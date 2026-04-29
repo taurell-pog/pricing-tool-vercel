@@ -153,32 +153,75 @@ Inside string values, NEVER use unescaped double quotes - rephrase if needed.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  AGENT 2: Haiku — Fetch current price for one product at one URL
+//  fetchPrice - Aggregator-first price scout
+//
+//  Why aggregator first?
+//    Modern retailer sites (x-kom, alza, emag etc) are React/Next.js SPAs
+//    that render prices client-side. Anthropic's web_fetch gets the raw HTML
+//    (no JS execution), which often doesn't contain the price.
+//    Aggregators (ceneo, heureka, arukereso, compari) have STATIC HTML with
+//    prices visible to crawlers — far more reliable.
+//
+//  Strategy:
+//    1. Search the aggregator for the product. Read price from the listing.
+//    2. If aggregator has nothing, search the retailer directly via Google.
+//    3. If still nothing, return null (genuinely unavailable).
+//
+//  modelOverride: pass MODEL_SONNET for critical lookups (e.g. LORGAR price);
+//                 default is Haiku for cheap/fast competitor lookups.
 // ─────────────────────────────────────────────────────────────────────────────
-async function fetchPrice(productName, retailerUrl, aggregatorUrl, country) {
+async function fetchPrice(productName, retailerUrl, aggregatorUrl, country, modelOverride) {
   const market = MARKETS[country];
+  const model = modelOverride || MODEL_HAIKU;
+
   const prompt =
 `Find the CURRENT selling price for one product in ${country}.
 
 PRODUCT: ${productName}
-RETAILER URL: ${retailerUrl || "(none — use aggregator)"}
-AGGREGATOR URL: ${aggregatorUrl || "(none)"}
+${aggregatorUrl ? `AGGREGATOR LISTING: ${aggregatorUrl}` : ""}
+${retailerUrl ? `RETAILER PAGE: ${retailerUrl}` : ""}
 CURRENCY: ${market.currency}
 
-WHAT TO DO
-  1. If a retailer URL is given, use web_fetch to load that page and read the current selling price (NOT the crossed-out RRP, NOT historical, NOT a different product).
-  2. If web_fetch fails or the page doesn't show the product, use web_search for the product name on ${market.aggregator}.
-  3. The price must be the actual amount a customer pays today, in ${market.currency}.
-  4. If the product is genuinely unavailable, return price: null.
+STRATEGY (in order — stop at the first success)
+  1. Search ${market.aggregator} for the product. Aggregators have static HTML
+     and clearly visible per-retailer prices. This is your PRIMARY source —
+     prefer it even when a retailer URL is given. Pick the LOWEST current
+     selling price from a trusted retailer (${market.retailers.join(", ")}).
+  2. If the aggregator has no result for this product, search Google for
+     "<product name> ${market.currency}" and look for prices in snippets from
+     the trusted retailers above.
+  3. If still nothing, search for "<product name> ${country}" — the product
+     might exist somewhere we haven't tried.
+
+  Critical: report only CURRENT selling price (NOT crossed-out RRP, NOT historical,
+  NOT a different product variant). Reject 3rd-party marketplace listings.
 
 OUTPUT - return ONLY this JSON, no markdown, no commentary:
 {
   "price": <number or null>,
   "currency": "${market.currency}",
-  "source_url": "<the URL where you confirmed the price>",
+  "source_url": "<URL where you confirmed the price>",
   "source_name": "<retailer or aggregator domain>",
   "in_stock": <true or false>,
-  "note": "<one short sentence, e.g. 'price confirmed on x-kom.pl' or 'out of stock everywhere'>"
+  "note": "<one short sentence explaining where the price came from, or why it couldn't be found>"
+}`;
+
+  const resp = await callClaude({
+    model,
+    max_tokens: 600,
+    system: [{
+      type: "text",
+      text: "You are a price scout. You find current selling prices on European e-commerce sites. Aggregators (ceneo, heureka, arukereso, compari) are your primary source — their HTML is static and price data is reliable. Respond with ONLY a single valid JSON object. Never use unescaped double quotes inside string values.",
+      cache_control: { type: "ephemeral" },
+    }],
+    tools: [
+      { type: "web_search_20250305", name: "web_search", max_uses: 3, user_location: { type: "approximate", country: market.code } },
+    ],
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  const text = getTextFromResponse(resp);
+  return extractJSON(text);
 }`;
 
   const resp = await callClaude({
@@ -316,7 +359,7 @@ export async function researchSku(product, country, onProgress) {
   // Step 2: LORGAR price + each competitor price in parallel via Haiku
   // Build search URL for LORGAR (we don't have its retailer URL beforehand)
   const lorgarAggUrl = market.aggregatorSearch(product.n);
-  const lorgarPriceP = fetchPrice(product.n, null, lorgarAggUrl, country)
+  const lorgarPriceP = fetchPrice(product.n, null, lorgarAggUrl, country, MODEL_SONNET)
     .catch(err => ({ price: null, currency: market.currency, source_url: null, source_name: null, in_stock: false, note: `Error: ${err.message}` }));
 
   const competitorPriceP = competitorMap.map(c =>
