@@ -174,13 +174,14 @@ async function fetchPrice(productName, retailerUrl, aggregatorUrl, country, mode
   const market = MARKETS[country];
   const model = modelOverride || MODEL_HAIKU;
 
+  const aggregatorLine = aggregatorUrl ? "AGGREGATOR LISTING: " + aggregatorUrl + "\n" : "";
+  const retailerLine = retailerUrl ? "RETAILER PAGE: " + retailerUrl + "\n" : "";
+
   const prompt =
 `Find the CURRENT selling price for one product in ${country}.
 
 PRODUCT: ${productName}
-${aggregatorUrl ? `AGGREGATOR LISTING: ${aggregatorUrl}` : ""}
-${retailerUrl ? `RETAILER PAGE: ${retailerUrl}` : ""}
-CURRENCY: ${market.currency}
+${aggregatorLine}${retailerLine}CURRENCY: ${market.currency}
 
 STRATEGY (in order — stop at the first success)
   1. Search ${market.aggregator} for the product. Aggregators have static HTML
@@ -216,24 +217,6 @@ OUTPUT - return ONLY this JSON, no markdown, no commentary:
     }],
     tools: [
       { type: "web_search_20250305", name: "web_search", max_uses: 3, user_location: { type: "approximate", country: market.code } },
-    ],
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const text = getTextFromResponse(resp);
-  return extractJSON(text);
-}`;
-
-  const resp = await callClaude({
-    model: MODEL_HAIKU,
-    max_tokens: 500,
-    system: [{
-      type: "text",
-      text: "You are a price scout. You read product pages and extract the current selling price. Respond with ONLY a single valid JSON object. No preamble, no markdown, no narration. Never use unescaped double quotes inside string values.",
-      cache_control: { type: "ephemeral" },
-    }],
-    tools: [
-      { type: "web_search_20250305", name: "web_search", max_uses: 2, user_location: { type: "approximate", country: market.code } },
     ],
     messages: [{ role: "user", content: prompt }],
   });
