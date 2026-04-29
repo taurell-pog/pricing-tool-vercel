@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import Login from "./Login.jsx";
 import { PRODUCTS, CATEGORIES, CAT_ICON, CAT_COLOR, MARKETS } from "./data.js";
 import { researchSku } from "./api.js";
-import { loadHistory, appendSnapshot, clearHistory, exportCSV, exportXLSX, buildFlatRows } from "./storage.js";
+import { loadHistory, appendSnapshot, clearHistory, exportCSV, exportXLSX, buildFlatRows, loadPricelist, setPriceCell, getPriceCell } from "./storage.js";
 
 const COUNTRIES = Object.keys(MARKETS);
 
@@ -33,6 +33,7 @@ export default function App() {
       <TopBar user={user} tab={tab} onTab={setTab} onLogout={handleLogout} />
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {tab === "research" && <ResearchTab user={user} />}
+        {tab === "pricelist" && <PricelistTab user={user} />}
         {tab === "history" && <HistoryTab user={user} />}
       </div>
     </div>
@@ -53,8 +54,9 @@ function TopBar({ user, tab, onTab, onLogout }) {
 
       <div style={{ display: "flex", background: "#0d1117", borderRadius: 8, padding: 3, gap: 2, border: "1px solid #30363d", marginLeft: 16 }}>
         {[
-          { id: "research", label: "Research" },
-          { id: "history",  label: "History" },
+          { id: "research",  label: "Research" },
+          { id: "pricelist", label: "Pricelist" },
+          { id: "history",   label: "History" },
         ].map(t => (
           <button key={t.id} onClick={() => onTab(t.id)}
             style={{ padding: "5px 16px", borderRadius: 6, border: "none", background: tab === t.id ? "#e85d04" : "transparent", color: tab === t.id ? "#fff" : "#8b949e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
@@ -83,10 +85,28 @@ function ResearchTab({ user }) {
   const [progress, setProgress] = useState({ done: 0, total: 0, currentSku: null });
   const [results, setResults] = useState(new Map()); // sku -> {status, data, error}
   const [stopFlag, setStopFlag] = useState(false);
+  const [pricelist, setPricelist] = useState({});
+
+  useEffect(() => { setPricelist(loadPricelist(user)); }, [user]);
+
+  // How many of the selected SKUs have a manual price set for the chosen country?
+  const skusWithManualPrice = useMemo(() => {
+    const set = new Set();
+    for (const s of selectedSkus) {
+      if (getPriceCell(pricelist, country, s) != null) set.add(s);
+    }
+    return set;
+  }, [pricelist, country, selectedSkus]);
 
   const numSelected = selectedSkus.size;
+  const numWithPrice = skusWithManualPrice.size;
   const numDone = [...results.values()].filter(r => r.status === "done").length;
   const numErr = [...results.values()].filter(r => r.status === "error").length;
+
+  // Cost estimate: ~$0.04 saved per SKU when manual price provided
+  // Sonnet competitive map: ~$0.05/SKU. Haiku competitor prices: ~$0.005 each × ~10 = ~$0.05.
+  // With manual price: ~$0.10/SKU. Without: ~$0.14/SKU.
+  const estimatedCost = (numWithPrice * 0.10 + (numSelected - numWithPrice) * 0.14).toFixed(2);
 
   function toggleSku(sku) {
     setSelectedSkus(p => { const n = new Set(p); n.has(sku) ? n.delete(sku) : n.add(sku); return n; });
@@ -108,7 +128,6 @@ function ResearchTab({ user }) {
     setRunning(true);
     setStopFlag(false);
     setProgress({ done: 0, total: queue.length, currentSku: null });
-    // Mark all queued as pending
     setResults(p => {
       const n = new Map(p);
       for (const s of queue) n.set(s, { status: "pending", data: null, error: null });
@@ -119,17 +138,17 @@ function ResearchTab({ user }) {
       if (stopFlag) break;
       const sku = queue[i];
       const product = PRODUCTS.find(p => p.s === sku);
+      const manualPrice = getPriceCell(pricelist, country, sku);
       setProgress(p => ({ ...p, currentSku: sku }));
       setResults(p => new Map(p).set(sku, { status: "running", data: null, error: null }));
       try {
-        const data = await researchSku(product, country, msg => setProgressMessage(msg));
+        const data = await researchSku(product, country, msg => setProgressMessage(msg), manualPrice);
         setResults(p => new Map(p).set(sku, { status: "done", data, error: null }));
         appendSnapshot(user, data);
       } catch (err) {
         setResults(p => new Map(p).set(sku, { status: "error", data: null, error: err.message }));
       }
       setProgress(p => ({ ...p, done: p.done + 1 }));
-      // 2s pause between SKUs to be polite to API
       if (i < queue.length - 1) await new Promise(r => setTimeout(r, 2000));
     }
 
@@ -159,7 +178,7 @@ function ResearchTab({ user }) {
 
           {!running ? (
             <button onClick={runScan} disabled={numSelected === 0}
-              style={{ width: "100%", padding: 11, background: numSelected > 0 ? "#e85d04" : "#21262d", color: numSelected > 0 ? "#fff" : "#484f58", border: "none", borderRadius: 7, cursor: numSelected > 0 ? "pointer" : "not-allowed", fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+              style={{ width: "100%", padding: 11, background: numSelected > 0 ? "#e85d04" : "#21262d", color: numSelected > 0 ? "#fff" : "#484f58", border: "none", borderRadius: 7, cursor: numSelected > 0 ? "pointer" : "not-allowed", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
               Run scan ({numSelected} SKU)
             </button>
           ) : (
@@ -174,6 +193,26 @@ function ResearchTab({ user }) {
                 <span>{progress.done}/{progress.total} done</span>
               </div>
               <button onClick={() => setStopFlag(true)} style={{ width: "100%", padding: 7, background: "#da3633", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Stop after current</button>
+            </div>
+          )}
+
+          {!running && numSelected > 0 && (
+            <div style={{ marginBottom: 10, padding: "6px 8px", background: "#0d1117", border: "1px solid #21262d", borderRadius: 6, fontSize: 10, lineHeight: 1.5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", color: "#8b949e", marginBottom: 2 }}>
+                <span>Manual prices in {country}:</span>
+                <span style={{ color: numWithPrice === numSelected ? "#3fb950" : numWithPrice > 0 ? "#e3b341" : "#f85149", fontWeight: 600 }}>
+                  {numWithPrice}/{numSelected}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", color: "#8b949e" }}>
+                <span>Est. cost:</span>
+                <span style={{ color: "#79c0ff", fontFamily: "monospace", fontWeight: 600 }}>~${estimatedCost}</span>
+              </div>
+              {numWithPrice < numSelected && (
+                <div style={{ marginTop: 4, color: "#6e7681", fontStyle: "italic", fontSize: 9 }}>
+                  Tip: enter LORGAR prices in the Pricelist tab for cheaper, more reliable scans.
+                </div>
+              )}
             </div>
           )}
 
@@ -196,6 +235,7 @@ function ResearchTab({ user }) {
                   const isSel = selectedSkus.has(p.s);
                   const r = results.get(p.s);
                   const dot = r?.status === "done" ? "#3fb950" : r?.status === "running" ? "#e3b341" : r?.status === "error" ? "#f85149" : null;
+                  const manualPrice = getPriceCell(pricelist, country, p.s);
                   return (
                     <div key={p.s} onClick={() => !running && toggleSku(p.s)}
                       style={{ padding: "5px 8px", cursor: running ? "default" : "pointer", display: "flex", alignItems: "center", gap: 6, background: isSel ? "#131a24" : "transparent", borderRadius: 4, marginBottom: 2 }}>
@@ -203,6 +243,12 @@ function ResearchTab({ user }) {
                         {isSel && <span style={{ color: "#0d1117", fontSize: 8, fontWeight: 900 }}>✓</span>}
                       </div>
                       <span style={{ fontSize: 10, color: isSel ? "#e6edf3" : "#8b949e", flex: 1 }}>{p.n.replace("LORGAR ", "")}</span>
+                      {manualPrice != null && (
+                        <span title={`Manual price: ${manualPrice} ${MARKETS[country].currency}`}
+                          style={{ fontSize: 8, color: "#3fb950", background: "#3fb95020", padding: "1px 4px", borderRadius: 3, fontFamily: "monospace", fontWeight: 700 }}>
+                          {manualPrice}
+                        </span>
+                      )}
                       {dot && <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
                       <code style={{ fontSize: 8, color: "#484f58", flexShrink: 0 }}>{p.s}</code>
                     </div>
@@ -275,6 +321,9 @@ function ResearchResults({ results, country }) {
                   <div style={{ textAlign: "right" }}>
                     <div style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 700, color: "#e85d04" }}>
                       {r.data.lorgar_price != null ? `${r.data.lorgar_price} ${r.data.currency}` : "N/A"}
+                      {r.data.lorgar_price_source === "manual" && (
+                        <span title="Price entered manually in the Pricelist tab" style={{ marginLeft: 5, fontSize: 8, color: "#3fb950", background: "#3fb95020", padding: "1px 4px", borderRadius: 3, fontWeight: 700, fontFamily: "system-ui" }}>manual</span>
+                      )}
                     </div>
                     <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", marginTop: 1 }}>
                       {r.data.lorgar_retail_link && <a href={r.data.lorgar_retail_link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ fontSize: 9, color: "#58a6ff", textDecoration: "none", padding: "0 4px", background: "#58a6ff18", borderRadius: 4 }}>shop</a>}
@@ -361,6 +410,124 @@ function Pill({ kind }) {
   const c = map[kind] || map.PARITY;
   return <span style={{ padding: "1px 6px", borderRadius: 10, fontSize: 10, fontWeight: 700, background: c.bg, color: c.fg }}>{kind}</span>;
 }
+
+// ─── Pricelist tab ──────────────────────────────────────────────────────────
+function PricelistTab({ user }) {
+  const [pricelist, setPricelist] = useState({});
+  const [filterCategory, setFilterCategory] = useState("All");
+  const [editing, setEditing] = useState({}); // sku::country -> string value being typed
+
+  useEffect(() => { setPricelist(loadPricelist(user)); }, [user]);
+
+  const filteredProducts = useMemo(() => {
+    if (filterCategory === "All") return PRODUCTS;
+    return PRODUCTS.filter(p => p.c === filterCategory);
+  }, [filterCategory]);
+
+  function commitCell(sku, country, raw) {
+    const next = setPriceCell(user, country, sku, raw);
+    setPricelist(next);
+    setEditing(e => { const n = { ...e }; delete n[`${sku}::${country}`]; return n; });
+  }
+
+  function handleChange(sku, country, raw) {
+    setEditing(e => ({ ...e, [`${sku}::${country}`]: raw }));
+  }
+
+  function handleBlur(sku, country) {
+    const k = `${sku}::${country}`;
+    if (k in editing) commitCell(sku, country, editing[k]);
+  }
+
+  function handleKey(e, sku, country) {
+    if (e.key === "Enter") { e.target.blur(); }
+    if (e.key === "Escape") {
+      setEditing(prev => { const n = { ...prev }; delete n[`${sku}::${country}`]; return n; });
+      e.target.blur();
+    }
+  }
+
+  function clearAllPrices() {
+    if (!confirm("Clear all manual prices for all countries? This cannot be undone.")) return;
+    try { localStorage.removeItem(`u__${user.nick}_${user.pin}__pricelist`); } catch {}
+    setPricelist({});
+  }
+
+  // Coverage statistics
+  const totalCells = PRODUCTS.length * COUNTRIES.length;
+  const filledCells = COUNTRIES.reduce((sum, c) => sum + Object.keys(pricelist[c] || {}).length, 0);
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "14px 18px", overflow: "hidden" }}>
+      <div style={{ marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#f0f6fc" }}>LORGAR Pricelist</div>
+        <div style={{ fontSize: 11, color: "#8b949e" }}>
+          Manual prices per country. Used during scans instead of auto-search — faster, cheaper, more accurate.
+        </div>
+        <div style={{ flex: 1 }} />
+        <select value={filterCategory} onChange={e => setFilterCategory(e.target.value)}
+          style={{ padding: "5px 10px", background: "#21262d", color: "#e6edf3", border: "1px solid #30363d", borderRadius: 6, fontSize: 12 }}>
+          <option>All</option>
+          {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+        </select>
+        <span style={{ fontSize: 11, color: "#8b949e" }}>
+          Coverage: <span style={{ color: filledCells > 0 ? "#3fb950" : "#6e7681", fontWeight: 600 }}>{filledCells}/{totalCells}</span>
+        </span>
+        {filledCells > 0 && (
+          <button onClick={clearAllPrices} style={{ padding: "5px 10px", background: "#21262d", color: "#f85149", border: "1px solid #f8514944", borderRadius: 6, cursor: "pointer", fontSize: 11 }}>Clear all</button>
+        )}
+      </div>
+
+      <div style={{ flex: 1, overflow: "auto", border: "1px solid #21262d", borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+            <tr style={{ background: "#0d1117" }}>
+              <th style={{ padding: "7px 10px", textAlign: "left", color: "#6e7681", fontWeight: 600, fontSize: 10, borderBottom: "2px solid #30363d", borderRight: "1px solid #21262d", position: "sticky", left: 0, background: "#0d1117", minWidth: 90 }}>SKU</th>
+              <th style={{ padding: "7px 10px", textAlign: "left", color: "#6e7681", fontWeight: 600, fontSize: 10, borderBottom: "2px solid #30363d", borderRight: "1px solid #21262d", position: "sticky", left: 90, background: "#0d1117", minWidth: 220 }}>Product</th>
+              {COUNTRIES.map(country => (
+                <th key={country} style={{ padding: "7px 10px", textAlign: "left", color: "#c9d1d9", fontWeight: 600, fontSize: 10, borderBottom: "2px solid #30363d", whiteSpace: "nowrap" }}>
+                  {country}
+                  <div style={{ fontSize: 9, color: "#484f58", fontWeight: 400 }}>{MARKETS[country].currency}</div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredProducts.map((p, idx) => (
+              <tr key={p.s} style={{ borderBottom: "1px solid #161b22", background: idx % 2 ? "#0d111788" : "transparent" }}>
+                <td style={{ padding: "4px 10px", color: "#484f58", fontFamily: "monospace", fontSize: 10, borderRight: "1px solid #21262d", position: "sticky", left: 0, background: idx % 2 ? "#0d111788" : "#0d1117" }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: CAT_COLOR[p.c], background: `${CAT_COLOR[p.c]}22`, padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>[{CAT_ICON[p.c]}]</span>
+                  {p.s}
+                </td>
+                <td style={{ padding: "4px 10px", color: "#c9d1d9", borderRight: "1px solid #21262d", position: "sticky", left: 90, background: idx % 2 ? "#0d111788" : "#0d1117", whiteSpace: "nowrap" }}>{p.n.replace("LORGAR ", "")}</td>
+                {COUNTRIES.map(country => {
+                  const k = `${p.s}::${country}`;
+                  const stored = getPriceCell(pricelist, country, p.s);
+                  const value = k in editing ? editing[k] : (stored != null ? String(stored) : "");
+                  return (
+                    <td key={country} style={{ padding: "2px 4px" }}>
+                      <input type="text" inputMode="decimal" value={value}
+                        placeholder="—"
+                        onChange={e => handleChange(p.s, country, e.target.value)}
+                        onBlur={() => handleBlur(p.s, country)}
+                        onKeyDown={e => handleKey(e, p.s, country)}
+                        style={{ width: 80, padding: "4px 6px", background: stored != null ? "#0d1f12" : "#0d1117", border: `1px solid ${stored != null ? "#3fb95044" : "#21262d"}`, borderRadius: 4, color: stored != null ? "#3fb950" : "#c9d1d9", fontSize: 11, fontFamily: "monospace", outline: "none", textAlign: "right" }} />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: 8, fontSize: 10, color: "#6e7681", lineHeight: 1.5 }}>
+        Auto-saved per cell. Tab/Enter to confirm, Esc to cancel. Values are in the country's local currency.
+      </div>
+    </div>
+  );
+}
+
 
 // ─── History tab ────────────────────────────────────────────────────────────
 function HistoryTab({ user }) {

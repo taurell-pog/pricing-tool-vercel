@@ -174,3 +174,44 @@ function downloadFile(content, filename, mimeType) {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 100);
 }
+
+// ─── Pricelist storage (per user) ────────────────────────────────────────────
+// Shape: { [country]: { [sku]: priceNumber } }
+const PRICELIST_KEY = "pricelist";
+
+function pricelistKey(user) {
+  return `u__${user.nick}_${user.pin}__${PRICELIST_KEY}`;
+}
+
+export function loadPricelist(user) {
+  try {
+    const raw = localStorage.getItem(pricelistKey(user));
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function savePricelist(user, pricelist) {
+  try {
+    localStorage.setItem(pricelistKey(user), JSON.stringify(pricelist));
+  } catch (e) {
+    console.error("Failed to save pricelist:", e);
+  }
+}
+
+export function setPriceCell(user, country, sku, value) {
+  const pricelist = loadPricelist(user);
+  if (!pricelist[country]) pricelist[country] = {};
+  if (value == null || value === "" || isNaN(Number(value))) {
+    delete pricelist[country][sku];
+  } else {
+    pricelist[country][sku] = Number(value);
+  }
+  savePricelist(user, pricelist);
+  return pricelist;
+}
+
+export function getPriceCell(pricelist, country, sku) {
+  return pricelist[country]?.[sku];
+}

@@ -329,21 +329,32 @@ function classifyAndScore(competitor, lorgarPrice, lorgarName, productCategory, 
 //  ORCHESTRATOR: research one SKU on one market
 //  Returns full pricing record ready for storage + display.
 // ─────────────────────────────────────────────────────────────────────────────
-export async function researchSku(product, country, onProgress) {
+export async function researchSku(product, country, onProgress, manualLorgarPrice) {
   const market = MARKETS[country];
   const observedAt = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  const hasManualPrice = manualLorgarPrice != null && manualLorgarPrice !== "" && !isNaN(Number(manualLorgarPrice));
   onProgress?.("Building competitive map (Sonnet)...");
 
-  // Step 1: Sonnet builds competitive map (we also pass LORGAR product info for its own price lookup later)
+  // Step 1: Sonnet builds competitive map
   const competitorMap = await buildCompetitiveMap(product, country);
 
   onProgress?.(`Found ${competitorMap.length} competitors. Scouting prices...`);
 
-  // Step 2: LORGAR price + each competitor price in parallel via Haiku
-  // Build search URL for LORGAR (we don't have its retailer URL beforehand)
+  // Step 2: prices in parallel
+  // - If manual LORGAR price given (preferred): skip Sonnet lookup entirely (saves $$ + more reliable).
+  // - Otherwise: fall back to Sonnet-based lookup for LORGAR.
   const lorgarAggUrl = market.aggregatorSearch(product.n);
-  const lorgarPriceP = fetchPrice(product.n, null, lorgarAggUrl, country, MODEL_SONNET)
-    .catch(err => ({ price: null, currency: market.currency, source_url: null, source_name: null, in_stock: false, note: `Error: ${err.message}` }));
+  const lorgarPriceP = hasManualPrice
+    ? Promise.resolve({
+        price: Number(manualLorgarPrice),
+        currency: market.currency,
+        source_url: null,
+        source_name: "manual input",
+        in_stock: true,
+        note: `Manual price entered by user: ${manualLorgarPrice} ${market.currency}`,
+      })
+    : fetchPrice(product.n, null, lorgarAggUrl, country, MODEL_SONNET)
+        .catch(err => ({ price: null, currency: market.currency, source_url: null, source_name: null, in_stock: false, note: `Error: ${err.message}` }));
 
   const competitorPriceP = competitorMap.map(c =>
     fetchPrice(c.product_name, c.retailer_url, c.aggregator_url, country)
@@ -374,7 +385,7 @@ export async function researchSku(product, country, onProgress) {
     return classifyAndScore(merged, lorgarPriceData.price, product.n, product.c, country);
   });
 
-  // Drop competitors with no price (Haiku couldn't find a real one)
+  // Drop competitors with no price
   const validCompetitors = competitors.filter(c => c.price != null);
 
   // Sort by total score desc, keep top 10
@@ -389,6 +400,7 @@ export async function researchSku(product, country, onProgress) {
     currency: market.currency,
     observed_at: observedAt,
     lorgar_price: lorgarPriceData.price,
+    lorgar_price_source: hasManualPrice ? "manual" : "auto",
     lorgar_retail_link: lorgarPriceData.source_url,
     lorgar_comparison_link: lorgarAggUrl,
     lorgar_in_stock: lorgarPriceData.in_stock,
